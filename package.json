@@ -1,0 +1,90 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "cursor-changelog",
+  "title": "Software Changelog Tracker",
+  "description": "View and update changelog information for various software tools",
+  "private": true,
+  "icon": "icon.png",
+  "author": "simochee",
+  "commands": [
+    {
+      "name": "view-changelog",
+      "title": "View Changelog",
+      "description": "View all changelog entries for the selected tool",
+      "mode": "view"
+    },
+    {
+      "name": "update-changelog",
+      "title": "Update Changelog",
+      "description": "Fetch and update the changelog database for the selected tool",
+      "mode": "view"
+    },
+    {
+      "name": "get-latest",
+      "title": "Get Latest",
+      "description": "Show the latest version and changes for the selected tool",
+      "mode": "view"
+    },
+    {
+      "name": "change-tool",
+      "title": "Change Tool",
+      "description": "Change the tool or software to track changelog for",
+      "mode": "view"
+    },
+    {
+      "name": "list-tools",
+      "title": "List Supported Tools",
+      "description": "View all supported tools and their changelog URLs",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "apiKey",
+      "type": "password",
+      "required": true,
+      "title": "Firecrawl API Key",
+      "description": "API key for the Firecrawl service",
+      "placeholder": "fc-your-api-key"
+    },
+    {
+      "name": "toolName",
+      "type": "textfield",
+      "required": false,
+      "title": "Tool Name",
+      "description": "Name of the tool to fetch changelog for (defaults to Cursor if not specified)",
+      "placeholder": "Cursor"
+    },
+    {
+      "name": "changelogUrl",
+      "type": "textfield",
+      "required": false,
+      "title": "Changelog URL",
+      "description": "URL of the changelog page (will be automatically determined from tool name if not specified)",
+      "placeholder": "https://cursor.com/changelog"
+    }
+  ],
+  "license": "MIT",
+  "packageManager": "pnpm@9.5.0-beta.0+sha256.bd91cddc9b205c94b5bf0380cec8fc8e4b1dde7b8c5191732f3d4e73848e860e",
+  "volta": {
+    "node": "22.3.0"
+  },
+  "scripts": {
+    "dev": "ray develop",
+    "postinstall": "lefthook install"
+  },
+  "dependencies": {
+    "@mendable/firecrawl-js": "^1.0.32",
+    "@raycast/api": "^1.77.3",
+    "@raycast/utils": "^1.16.1",
+    "got": "^14.4.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.8.3",
+    "@tsconfig/node22": "^22.0.0",
+    "@types/got": "^9.6.12",
+    "@types/react": "^18.3.3",
+    "lefthook": "^1.6.18",
+    "sort-package-json": "^2.10.0"
+  }
+}
