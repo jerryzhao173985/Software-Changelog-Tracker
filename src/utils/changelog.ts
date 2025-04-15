@@ -23,66 +23,96 @@ interface ChangelogEntry {
 }
 
 // Custom scraping configurations for specific tools
-const toolScrapingConfigs: Record<string, {
+interface ChangelogScrapingConfig {
+  url?: string; // Allow overriding the URL
   contentSelector?: string;
   excludeTags?: string[];
-  includeSelectors?: string[];
+  includeTags?: string[]; // Changed from includeSelectors
+  onlyMainContent?: boolean; // Allow controlling onlyMainContent
   waitFor?: number;
-}> = {
+  formats?: ("markdown" | "html" | "rawHtml")[]; // Allow specifying formats
+}
+
+const toolScrapingConfigs: Record<string, ChangelogScrapingConfig> = {
   "GitHub": {
-    contentSelector: ".markdown-body",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1000
+    contentSelector: ".js-ajax-root", // More specific container for the articles
+    excludeTags: ["header", "footer", "nav", ".gh-changelog-archive-hero", "#changelog-category-select", "script", "style", "aside"], // Added hero, category select, aside, script, style
+    includeTags: ["main.col-xs-12.col-sm-9.col-md-8.body"],
+    onlyMainContent: false,
+    waitFor: 1000, // 1 second seems sufficient
+    formats: ["markdown"], // Only markdown needed now
   },
   "Cursor": {
-    contentSelector: "main, .markdown-body, article",
-    excludeTags: ["header", "footer", "nav"],
+    contentSelector: "main", // Simplified selector, relies on onlyMainContent
+    excludeTags: ["header", "footer", "nav", "script", "style"], // Added script, style
     waitFor: 2000
   },
   "Visual Studio Code": {
-    contentSelector: ".body, main, .changelog",
-    excludeTags: ["header", "nav", "footer", "script", "style"],
-    waitFor: 2000
+    url: "https://code.visualstudio.com/updates",
+    excludeTags: ["header", "footer", "nav", "aside", ".edit-github", ".feedback"],
+    includeTags: ["main.col-xs-12.col-sm-9.col-md-8.body"],
+    onlyMainContent: false,
+    waitFor: 1000, // 1 second seems sufficient
+    formats: ["markdown"], // Only markdown needed now
   },
   "GitLab": {
-    contentSelector: ".release-block, .release",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 2000
+    url: "https://about.gitlab.com/releases/categories/releases/", // Override to blog category
+    includeTags: [".blog-card"], // Target summary cards
+    excludeTags: ["header", "footer", "nav", "aside", ".blog-sidebar-module", ".blog-heading-bar", ".newsletter-form-short", "script", "style"],
+    onlyMainContent: false, // Target specific cards
+    waitFor: 1500,
+    formats: ["markdown"],
   },
   "React": {
-    contentSelector: ".markdown-body, .releases",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1000
+    includeTags: ["article.markdown-body", ".release-body"],
+    excludeTags: ["header", "footer", "nav", "aside", ".gh-header-actions", ".sidebar-releases", "details.details-reset", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 1000,
+    formats: ["markdown"],
   },
   "Angular": {
-    contentSelector: ".markdown-body, .releases",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1000
+    includeTags: ["article.markdown-body", ".release-body"],
+    excludeTags: ["header", "footer", "nav", "aside", ".gh-header-actions", ".sidebar-releases", "details.details-reset", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 1000,
+    formats: ["markdown"],
   },
   "Vue.js": {
-    contentSelector: ".markdown-body, .releases",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1000
+    includeTags: ["article.markdown-body", ".release-body"],
+    excludeTags: ["header", "footer", "nav", "aside", ".gh-header-actions", ".sidebar-releases", "details.details-reset", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 1000,
+    formats: ["markdown"],
   },
   "Electron": {
-    contentSelector: ".markdown-body, .releases", 
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1000
+    includeTags: ["article.markdown-body", ".release-body"],
+    excludeTags: ["header", "footer", "nav", "aside", ".gh-header-actions", ".sidebar-releases", "details.details-reset", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 1000,
+    formats: ["markdown"],
   },
   "Node.js": {
-    contentSelector: ".release-content, .blog-content, article",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1500
+    url: "https://nodejs.org/en/blog/release/", // Target release category
+    includeTags: ["article.index-module__c6PDtG__container"],
+    excludeTags: ["header", "footer", "nav", "aside", ".index-module__FGimpW__blogHeader", ".index-module__KniMea__tabsList", ".index-module__KniMea__tabsSelect", ".index-module__OzKcOq__pagination", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 1500,
+    formats: ["markdown"],
   },
   "Docker": {
-    contentSelector: ".docs-content, main, article",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 2000
+    url: "https://docs.docker.com/release-notes/",
+    includeTags: ["div.blog-card"], // Target summary cards
+    excludeTags: ["header", "footer", "nav", "aside", ".breadcrumbs", ".sticky-top", ".tags", ".feedback", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 2000,
+    formats: ["markdown"],
   },
   "Kubernetes": {
-    contentSelector: ".markdown-body, .releases",
-    excludeTags: ["header", "footer", "nav"],
-    waitFor: 1000
+    includeTags: ["article.markdown-body", ".release-body"],
+    excludeTags: ["header", "footer", "nav", "aside", ".gh-header-actions", ".sidebar-releases", "details.details-reset", "script", "style"],
+    onlyMainContent: false,
+    waitFor: 1000,
+    formats: ["markdown"],
   }
 };
 
@@ -534,36 +564,37 @@ export const updateChangelog = async (apiKey: string, toolName?: string, changel
   const { toolInfo, dataDir, changelogFile } = toolData;
   
   console.log(`\n\n--- Starting Changelog Update for ${toolInfo.name} ---`);
-  console.log(`Using URL: ${toolInfo.url}`);
+  // Get tool-specific scraping configuration first
+  const scrapingConfig = getScrapingConfig(toolInfo.name);
+  const urlToScrape = scrapingConfig.url || toolInfo.url; // Use URL from config if provided
+  console.log(`Using URL: ${urlToScrape}`);
   
   try {
     ensureDataDir(dataDir);
     
     const app = new FirecrawlApp({ apiKey });
     
-    console.log(`Scraping changelog for ${toolInfo.name}...`);
-    
-    // Get tool-specific scraping configuration
-    const scrapingConfig = getScrapingConfig(toolInfo.name);
+    console.log(`Scraping changelog for ${toolInfo.name} from ${urlToScrape}...`);
     
     // Build options with tool-specific configuration
-    const scrapeOptions = { 
-      timeout: 45000,
-      formats: ["markdown", "rawHtml"] as ("markdown" | "rawHtml")[],
-      onlyMainContent: true,
-      excludeTags: scrapingConfig.excludeTags || ["iframe", "script", "style", "noscript", "svg"],
-      waitFor: scrapingConfig.waitFor || 2000
-    };
+    const scrapeOptions: any = {
+        timeout: 45000,
+        // Use formats from config or default to markdown
+        formats: scrapingConfig.formats || ["markdown"],
+        // Use waitFor from config or default
+        waitFor: scrapingConfig.waitFor || 2000,
+        // Use excludeTags from config or default
+        excludeTags: scrapingConfig.excludeTags || ["header", "footer", "nav", "aside", "script", "style", "noscript", "svg"],
+        // Only apply includeTags if present in config
+        ...(scrapingConfig.includeTags && { includeTags: scrapingConfig.includeTags }),
+        // Apply onlyMainContent from config if specified, otherwise default false
+        onlyMainContent: scrapingConfig.onlyMainContent !== undefined ? scrapingConfig.onlyMainContent : false,
+      };
+      
+    console.log(`DEBUG: Final scrapeOptions: ${JSON.stringify(scrapeOptions)}`);
     
-    // Add content selector if available
-    if (scrapingConfig.contentSelector) {
-      console.log(`DEBUG: Using custom content selector: ${scrapingConfig.contentSelector}`);
-      // Note: contentSelector is not directly supported in the current Firecrawl API,
-      // but we're preparing it for future use or custom implementation
-      // For now, we'll rely on onlyMainContent: true for similar functionality
-    }
-    
-    const response = await app.scrapeUrl(toolInfo.url, scrapeOptions); 
+    // Use the determined URL and options
+    const response = await app.scrapeUrl(urlToScrape, scrapeOptions); 
     
     const anyResponse = response as any;
     
