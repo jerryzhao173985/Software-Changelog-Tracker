@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import FirecrawlApp from "@mendable/firecrawl-js";
 import { getToolInfo, getDataDirName } from "./toolMapping";
-import { getLocalStorageItem } from "@raycast/api";
+import { getLocalStorageItem, LocalStorage, getPreferenceValues } from "@raycast/api";
 
 /**
  * Enhanced changelog scraping and extraction
@@ -19,7 +19,7 @@ import { getLocalStorageItem } from "@raycast/api";
 interface ChangelogEntry {
   version: string;
   description: string;
-  detailLink?: string;
+  detailLink?: string | null; // Allow null as per AI schema
 }
 
 // Custom scraping configurations for specific tools
@@ -559,153 +559,276 @@ const extractCursorChangelog = (markdownContent: string): Record<string, { descr
 };
 
 // Update the updateChangelog function to include the Cursor-specific extraction
-export const updateChangelog = async (apiKey: string, toolName?: string, changelogUrl?: string): Promise<ChangelogEntry[]> => {
+/**
+ * Updates the changelog by scraping the provided URL.
+ * Users can choose between the default extraction and an AI-powered extraction.
+ *
+ * @param apiKey - The Firecrawl API key.
+ * @param toolName - The name of the tool (optional).
+ * @param changelogUrl - The URL to scrape (optional, uses toolInfo if not provided).
+ * @param useAI - A boolean flag to select the extraction method.
+ *                false: Use manual/default parsing (default behavior).
+ *                true: Use FireCrawl's AI-powered extraction.
+ * @returns A promise that resolves to an array of ChangelogEntry objects.
+ */
+export const updateChangelog = async (apiKey: string, toolName?: string, changelogUrl?: string, useAI: boolean = false): Promise<ChangelogEntry[]> => {
   const toolData = await getToolData(toolName, changelogUrl);
   const { toolInfo, dataDir, changelogFile } = toolData;
   
   console.log(`\n\n--- Starting Changelog Update for ${toolInfo.name} ---`);
-  // Get tool-specific scraping configuration first
-  const scrapingConfig = getScrapingConfig(toolInfo.name);
-  const urlToScrape = scrapingConfig.url || toolInfo.url; // Use URL from config if provided
-  console.log(`Using URL: ${urlToScrape}`);
+  console.log(`Using ${useAI ? 'AI Extraction' : 'Default Extraction'} Method.`);
+
+  let changelogEntries: ChangelogEntry[] = [];
+  const app = new FirecrawlApp({ apiKey });
   
   try {
     ensureDataDir(dataDir);
-    
-    const app = new FirecrawlApp({ apiKey });
-    
-    console.log(`Scraping changelog for ${toolInfo.name} from ${urlToScrape}...`);
-    
-    // Build options with tool-specific configuration
-    const scrapeOptions: any = {
-        timeout: 45000,
-        // Use formats from config or default to markdown
-        formats: scrapingConfig.formats || ["markdown"],
-        // Use waitFor from config or default
-        waitFor: scrapingConfig.waitFor || 2000,
-        // Use excludeTags from config or default
-        excludeTags: scrapingConfig.excludeTags || ["header", "footer", "nav", "aside", "script", "style", "noscript", "svg"],
-        // Only apply includeTags if present in config
-        ...(scrapingConfig.includeTags && { includeTags: scrapingConfig.includeTags }),
-        // Apply onlyMainContent from config if specified, otherwise default false
-        onlyMainContent: scrapingConfig.onlyMainContent !== undefined ? scrapingConfig.onlyMainContent : false,
-      };
+
+    if (useAI) {
+      // --- AI-Powered Extraction Option ---
+      const urlToScrape = changelogUrl || toolInfo.url; // Use provided or default URL
+      console.log(`AI Scraping URL: ${urlToScrape}`);
       
-    console.log(`DEBUG: Final scrapeOptions: ${JSON.stringify(scrapeOptions)}`);
-    
-    // Use the determined URL and options
-    const response = await app.scrapeUrl(urlToScrape, scrapeOptions); 
-    
-    const anyResponse = response as any;
-    
-    // Check if the response indicates success and contains markdown content
-    let markdownContent: string | null = null;
-    let success = false;
-    let errorMsg = "Unknown Firecrawl error";
+      const aiScrapeOptions: any = { // Use 'any' for flexibility with extract object
+        formats: ['extract'],
+        extract: {
+          prompt: "Extract all distinct changelog entries, releases, or significant feature updates from this page, preserving the order they appear on the page (typically latest first). For each entry, provide its version identifier (e.g., 'v1.2.3', '2024-03-15', 'Feature Update Name') as 'version', a concise but informative description of the changes as 'description', and if available, a direct URL link to the full release notes or details page as 'detailLink'. Structure the output as a JSON array of objects, sorted from latest entry to oldest as found on the page. Each object must conform to the schema: { \"version\": string, \"description\": string, \"detailLink\": string | null }. Ensure descriptions are clean and capture the main points of the update. Prioritize official release notes sections if present.",
+          systemPrompt: "You are an expert assistant specialized in accurately parsing website content to extract structured changelog information into JSON format. Adhere strictly to the requested JSON array schema: [{ \"version\": string, \"description\": string, \"detailLink\": string | null }]. Crucially, ensure the returned array preserves the original order of entries as found on the webpage, typically from latest to oldest. Only include distinct changelog entries."
+        },
+        timeout: 60000 // Longer timeout for AI extraction
+      };
 
-    if (anyResponse && typeof anyResponse === 'object') {
-        success = anyResponse.success === true;
-        // Prefer markdown, but fallback to rawHtml if markdown is empty/missing
-        if (typeof anyResponse.markdown === 'string' && anyResponse.markdown.trim().length > 50) { // Require some substance
-            markdownContent = anyResponse.markdown;
-            console.log("DEBUG: Successfully extracted non-empty markdown content.");
-        } else if (typeof anyResponse.data?.rawHtml === 'string' && anyResponse.data.rawHtml.trim().length > 100) {
-             console.log("DEBUG: Markdown empty or short, falling back to raw HTML.");
-             // Improved HTML to Markdown conversion
-             let html = anyResponse.data.rawHtml;
-             
-             // Preserve headers
-             html = html.replace(/<h([1-6])[^>]*>(.*?)<\/h\1>/gi, (_, level, content) => {
-                 const headerMarkers = '#'.repeat(parseInt(level));
-                 return `\n${headerMarkers} ${content.trim()}\n`;
-             });
-             
-             // Preserve lists
-             html = html.replace(/<li[^>]*>(.*?)<\/li>/gi, '- $1\n');
-             
-             // Preserve paragraphs
-             html = html.replace(/<p[^>]*>(.*?)<\/p>/gi, '$1\n\n');
-             
-             // Preserve links
-             html = html.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, '[$2]($1)');
-             
-             // Replace breaks with newlines
-             html = html.replace(/<br\s*\/?>/gi, '\n');
-             
-             // Replace horizontal rules
-             html = html.replace(/<hr[^>]*>/gi, '\n---\n');
-             
-             // Strip remaining tags
-             html = html.replace(/<[^>]+>/g, '');
-             
-             // Fix extra whitespace and newlines
-             html = html.replace(/\n{3,}/g, '\n\n');
-             html = html.trim();
-             
-             markdownContent = html;
+      try {
+        console.log(`DEBUG: AI scrapeOptions: ${JSON.stringify(aiScrapeOptions)}`);
+        const aiResponse = await app.scrapeUrl(urlToScrape, aiScrapeOptions);
+        const anyResponse = aiResponse as any; // Cast to any to access extract
+
+        if (anyResponse && anyResponse.extract) {
+          let parsedData: any;
+          // If the response is a string, try parsing it as JSON.
+          if (typeof anyResponse.extract === 'string') {
+            try {
+              parsedData = JSON.parse(anyResponse.extract);
+            } catch (parseError) {
+              console.error("AI extraction: Unable to parse JSON string.", parseError);
+            }
+          } else {
+            parsedData = anyResponse.extract;
+          }
+
+          // Validate that the output is an array and each element has the required fields.
+          if (Array.isArray(parsedData)) {
+            const isValid = parsedData.every((entry: any) =>
+              typeof entry.version === 'string' &&
+              typeof entry.description === 'string' &&
+              (entry.detailLink === undefined || typeof entry.detailLink === 'string' || entry.detailLink === null) // Check detailLink type
+            );
+            if (isValid) {
+              console.log(`AI extraction successful. Found ${parsedData.length} changelog entries.`);
+              changelogEntries = parsedData.map((entry: any) => ({ // Ensure type safety
+                  version: entry.version,
+                  description: entry.description,
+                  detailLink: entry.detailLink === undefined ? null : entry.detailLink // Normalize detailLink
+              }));
+            } else {
+              console.error("AI extraction: Extracted data format is invalid; required fields are missing or have wrong types.");
+            }
+          } else {
+            console.error("AI extraction: Expected an array, but got a different data structure:", typeof parsedData);
+          }
+        } else {
+          console.error(`AI extraction: No extract data received. Response: ${JSON.stringify(aiResponse)}`);
         }
-    }
-
-    if (!success || !markdownContent) {
-        console.error(`Firecrawl scraping failed: ${errorMsg}`);
-        console.error("Falling back to existing changelog data.");
-        return loadChangelog(toolName, changelogUrl);
-    }
-
-    console.log(`DEBUG: Received Content Snippet (first 1000 chars):`);
-    console.log(markdownContent.slice(0, 1000) + '...');
-    
-    // Store the raw content in debug file
-    writeFileSync(join(dataDir, `raw_content_${toolInfo.name}.md`), markdownContent);
-    
-    // Special handling for Cursor changelog which has a unique format
-    let allPatches: Record<string, { description: string; detailLink?: string }> = {};
-    
-    if (toolInfo.name === "Cursor") {
-      console.log("Using specialized Cursor changelog extraction...");
-      allPatches = extractCursorChangelog(markdownContent);
+      } catch (error) {
+        console.error("Error during AI-powered extraction process:", error);
+        // Optionally: Fallback or return empty array
+      }
     } else {
-      // Standard extraction for other tools
-      console.log("Using unified block extraction strategy...");
-      allPatches = extractChangelogBlocks(markdownContent);
-    }
-    
-    console.log(`DEBUG: Total blocks extracted: ${Object.keys(allPatches).length}`);
+      // --- Default Extraction Option (Manual Parsing) ---
+      const scrapingConfig = getScrapingConfig(toolInfo.name);
+      const urlToScrape = scrapingConfig.url || toolInfo.url; // Use URL from config if provided
+      console.log(`Default Scraping URL: ${urlToScrape}`);
 
-    if (Object.keys(allPatches).length === 0) {
-      console.warn(`WARN: No changelog entries extracted for ${toolInfo.name}. The page structure might be unsupported or content too minimal.`);
-      // Return empty or existing, but log prominently.
-      // Maybe write the raw content to a debug file?
-      writeFileSync(join(dataDir, `failed_extraction_${toolInfo.name}.md`), markdownContent);
-      console.log(`DEBUG: Wrote raw content to failed_extraction_${toolInfo.name}.md for review.`);
-      return loadChangelog(toolName, changelogUrl); // Return old data on failure
+      const defaultScrapeOptions: any = {
+          timeout: 45000,
+          formats: scrapingConfig.formats || ["markdown"], // Default to markdown
+          waitFor: scrapingConfig.waitFor || 2000,
+          excludeTags: scrapingConfig.excludeTags || ["header", "footer", "nav", "aside", "script", "style", "noscript", "svg"],
+          ...(scrapingConfig.includeTags && { includeTags: scrapingConfig.includeTags }),
+          onlyMainContent: scrapingConfig.onlyMainContent !== undefined ? scrapingConfig.onlyMainContent : false,
+        };
+        
+      console.log(`DEBUG: Default scrapeOptions: ${JSON.stringify(defaultScrapeOptions)}`);
+
+      try {
+          const response = await app.scrapeUrl(urlToScrape, defaultScrapeOptions); 
+          const anyResponse = response as any;
+          
+          let markdownContent: string | null = null;
+          let success = false;
+          let errorMsg = "Unknown Firecrawl error";
+
+          if (anyResponse && typeof anyResponse === 'object') {
+              success = anyResponse.success === true;
+              if (typeof anyResponse.markdown === 'string' && anyResponse.markdown.trim().length > 50) {
+                  markdownContent = anyResponse.markdown;
+                  console.log("DEBUG: Successfully extracted non-empty markdown content.");
+              } else if (typeof anyResponse.data?.rawHtml === 'string' && anyResponse.data.rawHtml.trim().length > 100) {
+                  console.log("DEBUG: Markdown empty or short, attempting HTML to Markdown conversion.");
+                  // Existing HTML to Markdown conversion logic...
+                  let html = anyResponse.data.rawHtml;
+                  // ... (keep the HTML to Markdown conversion logic from the original function) ...
+                  // Preserve headers
+                  html = html.replace(/<h([1-6])[^>]*>(.*?)<\/h\1>/gi, (_, level, content) => {
+                      const headerMarkers = '#'.repeat(parseInt(level));
+                      return `\n${headerMarkers} ${content.trim()}\n`;
+                  });
+                  // Preserve lists
+                  html = html.replace(/<li[^>]*>(.*?)<\/li>/gi, '- $1\n');
+                  // Preserve paragraphs
+                  html = html.replace(/<p[^>]*>(.*?)<\/p>/gi, '$1\n\n');
+                  // Preserve links
+                  html = html.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, '[$2]($1)');
+                  // Replace breaks with newlines
+                  html = html.replace(/<br\s*\/?>/gi, '\n');
+                  // Replace horizontal rules
+                  html = html.replace(/<hr[^>]*>/gi, '\n---\n');
+                  // Strip remaining tags
+                  html = html.replace(/<[^>]+>/g, '');
+                  // Fix extra whitespace and newlines
+                  html = html.replace(/\\n{3,}/g, '\n\n');
+                  html = html.trim();
+                  markdownContent = html;
+              } else {
+                  errorMsg = "No suitable content (markdown or rawHtml) found in response.";
+              }
+          } else {
+              errorMsg = `Invalid response structure: ${JSON.stringify(anyResponse)}`;
+          }
+
+          if (!success || !markdownContent) {
+              console.error(`Firecrawl default scraping failed: ${errorMsg}`);
+              // Optionally: Fallback or return empty array
+          } else {
+              console.log(`DEBUG: Received Content Snippet (first 500 chars):`);
+              console.log(markdownContent.slice(0, 500) + '...');
+              
+              // Store the raw content in debug file
+              writeFileSync(join(dataDir, `raw_content_${toolInfo.name}_default.md`), markdownContent);
+              
+              let allPatches: Record<string, { description: string; detailLink?: string }> = {};
+              
+              if (toolInfo.name === "Cursor") {
+                console.log("Using specialized Cursor changelog extraction...");
+                allPatches = extractCursorChangelog(markdownContent);
+              } else {
+                console.log("Using unified block extraction strategy...");
+                allPatches = extractChangelogBlocks(markdownContent);
+              }
+              
+              console.log(`DEBUG: Total blocks extracted (default method): ${Object.keys(allPatches).length}`);
+
+              if (Object.keys(allPatches).length > 0) {
+                changelogEntries = consolidateVersions(allPatches);
+              } else {
+                console.warn(`WARN: Default extraction returned 0 entries for ${toolInfo.name}.`);
+                writeFileSync(join(dataDir, `failed_extraction_${toolInfo.name}_default.md`), markdownContent);
+                console.log(`DEBUG: Wrote raw content to failed_extraction_${toolInfo.name}_default.md for review.`);
+              }
+          }
+      } catch (error) {
+        console.error("Error during default extraction process:", error);
+        // Optionally: Fallback or return empty array
+      }
     }
 
-    // Consolidate/Sort versions
-    const changelog = consolidateVersions(allPatches);
-    
-    // Save to file
-    console.log(`Saving ${changelog.length} processed entries to ${changelogFile}`);
-    writeFileSync(changelogFile, JSON.stringify(changelog, null, 2));
-    
-    console.log(`--- Changelog Update for ${toolInfo.name} Finished Successfully ---`);
-    return changelog;
+    // If both methods failed or returned empty, load existing data as a fallback
+    if (changelogEntries.length === 0) {
+        console.warn("No changelog entries found using the selected method. Loading existing changelog data.");
+        const existingEntries = await loadChangelog(toolName, changelogUrl, false); // Pass false to avoid infinite loop
+        // Don't save empty array over potentially good old data
+        return existingEntries;
+    }
+
+    // Save the final changelog (from whichever method was chosen) to persistent storage.
+    await saveChangelog(changelogEntries, toolName, changelogUrl, useAI); // Pass useAI flag
+    console.log(`--- Changelog Update for ${toolInfo.name} Finished ---`);
+    return changelogEntries;
+
   } catch (error: any) {
-    console.error(`An error occurred during scraping or processing for ${toolInfo.name}: ${error.message || error}`);
-    // Optionally log stack trace for debugging
-     console.error(error.stack);
-     console.log(`--- Changelog Update for ${toolInfo.name} Failed ---`);
+    console.error(`An unexpected error occurred in updateChangelog for ${toolInfo.name}: ${error.message || error}`);
+    console.error(error.stack);
+    console.log(`--- Changelog Update for ${toolInfo.name} Failed ---`);
     // Load existing data if update fails to avoid showing nothing
-    return loadChangelog(toolName, changelogUrl); 
-    // throw error; // Re-throw if the calling function should handle it
+    return loadChangelog(toolName, changelogUrl, false); // Pass false to avoid infinite loop
   }
 };
 
+// Helper function to save changelog (adjust parameters as needed)
+const saveChangelog = async (entries: ChangelogEntry[], toolName?: string, changelogUrl?: string, useAI?: boolean): Promise<void> => {
+  const { changelogFile } = await getToolData(toolName, changelogUrl);
+  try {
+    let entriesToSave = entries;
+    // Only sort manually if not using AI extraction (trust AI order)
+    // if (!useAI) {
+    //    console.log("DEBUG: Manually sorting entries before saving (Default Extraction).");
+    //    entriesToSave = entries.sort((a, b) => compareVersions(b.version, a.version));
+    // } else {
+    //    console.log("DEBUG: Skipping manual sort, trusting AI order before saving.");
+    // }
+
+    console.log(`Saving ${entriesToSave.length} processed entries to ${changelogFile}`);
+    writeFileSync(changelogFile, JSON.stringify(entriesToSave, null, 2));
+    
+    // Update last updated timestamp in LocalStorage
+    await LocalStorage.setItem(`lastUpdated_${getDataDirName(toolName || '')}`, new Date().toISOString());
+
+  } catch (error) {
+    console.error(`Error saving changelog to ${changelogFile}:`, error);
+  }
+};
+
+
 // Load the changelog from file
-export const loadChangelog = async (toolName?: string, changelogUrl?: string): Promise<ChangelogEntry[]> => {
-  const { dataDir, changelogFile } = await getToolData(toolName, changelogUrl);
+export const loadChangelog = async (toolName?: string, changelogUrl?: string, triggerUpdateIfOld: boolean = true): Promise<ChangelogEntry[]> => {
+  const { dataDir, changelogFile, toolInfo } = await getToolData(toolName, changelogUrl);
+  const dataDirName = getDataDirName(toolInfo.name); // Use consistent naming
   
   ensureDataDir(dataDir);
+  
+  // Check if update is needed based on last updated time
+  if (triggerUpdateIfOld) {
+      const lastUpdatedString = await LocalStorage.getItem<string>(`lastUpdated_${dataDirName}`);
+      const oneDay = 24 * 60 * 60 * 1000; // Milliseconds in a day
+      let needsUpdate = true;
+
+      if (lastUpdatedString) {
+          const lastUpdated = new Date(lastUpdatedString).getTime();
+          const now = new Date().getTime();
+          if ((now - lastUpdated) < oneDay) {
+              needsUpdate = false;
+          }
+      }
+
+      // Retrieve API Key from preferences for potential background update
+      let apiKey: string | undefined;
+      try {
+        const preferences = getPreferenceValues<{ firecrawlApiKey: string }>();
+        apiKey = preferences.firecrawlApiKey;
+      } catch (e) {
+        console.warn("Could not retrieve API key from preferences.");
+      }
+
+      if (needsUpdate && apiKey) { // Check if apiKey was successfully retrieved
+          console.log(`Changelog for ${toolInfo.name} is old or missing timestamp. Triggering background update...`);
+          // Trigger update in the background (don't await)
+          updateChangelog(apiKey, toolName, changelogUrl, false).catch(err => { // Pass retrieved API key
+              console.error(`Background changelog update failed for ${toolInfo.name}:`, err);
+          }); 
+      } else if (needsUpdate) {
+          console.warn(`Changelog for ${toolInfo.name} is old, but API key is missing or couldn't be retrieved. Cannot trigger background update.`);
+      }
+  }
   
   if (!existsSync(changelogFile)) {
      console.log(`Changelog file not found: ${changelogFile}. Returning empty list.`);
@@ -723,7 +846,8 @@ export const loadChangelog = async (toolName?: string, changelogUrl?: string): P
       console.log(`DEBUG: First entries before re-sorting: ${parsedData.slice(0, 3).map(e => e.version).join(', ')}...`);
       
       // Re-sort to ensure consistent ordering
-      const sortedData = parsedData.sort((a, b) => compareVersions(b.version, a.version));
+      const sortedData = parsedData;
+      // const sortedData = parsedData.sort((a, b) => compareVersions(b.version, a.version));
       
       // Log after sorting
       console.log(`DEBUG: First entries after re-sorting: ${sortedData.slice(0, 3).map(e => e.version).join(', ')}...`);
@@ -961,39 +1085,18 @@ const isValidVersionHeader = (version: string, fullHeading: string): boolean => 
 
 // Consolidate versions - Handles semantic, date, and simple versions
 const consolidateVersions = (patchesDict: Record<string, { description: string; detailLink?: string }>): ChangelogEntry[] => {
-  console.log("DEBUG: --- Starting consolidateVersions ---");
-  console.log(`DEBUG: Consolidating ${Object.keys(patchesDict).length} raw blocks.`);
+  console.log(`DEBUG: Consolidating ${Object.keys(patchesDict).length} extracted blocks.`);
+  const changelog: ChangelogEntry[] = Object.entries(patchesDict).map(([version, data]) => ({
+    version,
+    description: data.description,
+    detailLink: data.detailLink || null // Ensure detailLink is null if undefined
+  }));
   
-  // First, create a list of all unique versions (keys)
-  const allVersions = Object.keys(patchesDict);
+  // // Sort by version (using the robust compareVersions function)
+  // changelog.sort((a, b) => compareVersions(b.version, a.version));
   
-  // Process each entry individually first to ensure no important data is lost
-  const consolidated: ChangelogEntry[] = [];
-  
-  for (const version of allVersions) {
-    const data = patchesDict[version];
-    // Skip entries without meaningful descriptions
-    if (!data || !data.description || data.description.length < 10) {
-      console.log(`DEBUG: Skipping consolidation for short/empty description for version ${version}`);
-      continue;
-    }
-    
-    // Add entry directly to consolidated list
-    consolidated.push({
-      version: version,
-      description: data.description,
-      detailLink: data.detailLink
-    });
-    
-    console.log(`DEBUG: Added version ${version} as individual entry`);
-  }
-  
-  // Sort by version (newest first using the custom sort)
-  consolidated.sort((a, b) => compareVersions(b.version, a.version));
-  
-  console.log(`DEBUG: Final consolidated count: ${consolidated.length}`);
-  console.log("DEBUG: --- Finished consolidateVersions ---");
-  return consolidated;
+  console.log(`DEBUG: Consolidated into ${changelog.length} entries. Newest first: ${changelog.slice(0, 3).map(e => e.version).join(', ')}`);
+  return changelog;
 };
 
 // Advanced version comparison for sorting

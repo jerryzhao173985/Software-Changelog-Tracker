@@ -3,10 +3,13 @@ import {
   Action,
   ActionPanel,
   Detail,
+  Form,
   Toast,
   showToast,
   getPreferenceValues,
-  getLocalStorageItem
+  getLocalStorageItem,
+  useNavigation,
+  Icon
 } from "@raycast/api";
 import { updateChangelog } from "./utils/changelog";
 import { getToolInfo } from "./utils/toolMapping";
@@ -17,62 +20,95 @@ interface Preferences {
   changelogUrl?: string;
 }
 
-export default function UpdateChangelog() {
-  const [isLoading, setIsLoading] = useState(true);
-  const [output, setOutput] = useState("Starting changelog update...");
-  const [success, setSuccess] = useState(false);
-  const [entriesCount, setEntriesCount] = useState(0);
+// Component to display the results after update (using Detail view)
+function UpdateResultDetail({ toolName, outputLog, success, entriesCount }: { toolName: string, outputLog: string, success: boolean, entriesCount: number }) {
+  const markdown = `# ${toolName} Changelog Update ${success ? "✅" : "❌"}
+  
+\`\`\`
+${outputLog}
+\`\`\`
+
+${success ? `Successfully processed ${entriesCount} changelog entries.` : "Update failed. See log above for details."}
+`;
+  return (
+    <Detail
+      markdown={markdown}
+      actions={
+        <ActionPanel>
+          <Action.CopyToClipboard
+            title="Copy Log"
+            content={outputLog}
+            shortcut={{ modifiers: ["cmd"], key: "c" }}
+          />
+        </ActionPanel>
+      }
+    />
+  );
+}
+
+export default function UpdateChangelogForm() {
+  const [isLoading, setIsLoading] = useState(false);
   const [toolInfo, setToolInfo] = useState({ name: "Changelog", url: "" });
+  const [extractionMethod, setExtractionMethod] = useState<string>("default");
+  const { push } = useNavigation();
   
   const preferences = getPreferenceValues<Preferences>();
   
-  // Load tool info from local storage first
+  // Load tool info on initial mount
   useEffect(() => {
     async function loadToolInfo() {
+      let name = preferences.toolName;
+      let url = preferences.changelogUrl;
       try {
         const storedToolName = await getLocalStorageItem("toolName") as string | undefined;
         const storedChangelogUrl = await getLocalStorageItem("changelogUrl") as string | undefined;
-        
-        // Get tool info from local storage values or fall back to preferences
-        const currentToolInfo = getToolInfo(
-          storedToolName || preferences.toolName,
-          storedChangelogUrl || preferences.changelogUrl
-        );
-        
-        setToolInfo(currentToolInfo);
+        name = storedToolName || name;
+        url = storedChangelogUrl || url;
       } catch (error) {
-        console.error("Error loading tool info:", error);
-        // Fall back to preference values if localStorage fails
-        setToolInfo(getToolInfo(preferences.toolName, preferences.changelogUrl));
+        console.error("Error loading tool info from local storage:", error);
       }
+      // Set tool info using possibly updated name/url
+      setToolInfo(getToolInfo(name, url));
     }
     
     loadToolInfo();
   }, []);
   
-  useEffect(() => {
-    // Only start fetching after toolInfo is loaded
-    if (toolInfo.url) {
-      fetchChangelog();
+  // Renamed and modified to handle form submission
+  async function handleSubmit() {
+    if (!toolInfo.url || !preferences.apiKey) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Missing Configuration",
+        message: "Please ensure API Key and Tool/URL are set.",
+      });
+      return;
     }
-  }, [toolInfo]);
-  
-  async function fetchChangelog() {
+    
+    setIsLoading(true);
+    let logOutput = `Starting changelog update for ${toolInfo.name} using ${extractionMethod === 'ai' ? 'AI' : 'Default'} Extraction...\n`;
+    logOutput += `Connecting to ${toolInfo.url}...\n`;
+    let finalSuccess = false;
+    let finalEntriesCount = 0;
+
+    await showToast({
+      style: Toast.Style.Animated,
+      title: `Updating ${toolInfo.name} Changelog...`,
+    });
+
     try {
-      setOutput((prev) => prev + `\nConnecting to ${toolInfo.url}...`);
+      const useAI = extractionMethod === 'ai';
       
-      const data = await updateChangelog(preferences.apiKey, toolInfo.name, toolInfo.url);
+      // Call updateChangelog with the selected method
+      const data = await updateChangelog(preferences.apiKey, toolInfo.name, toolInfo.url, useAI);
       
-      setOutput((prev) => 
-        prev + 
-        "\nConnection successful!" + 
-        "\nExtracting changelog data..." +
-        `\nFound ${data.length} changelog entries.` +
-        "\nChangelog database updated successfully!"
-      );
+      logOutput += "Connection successful!\n";
+      logOutput += "Extracting changelog data...\n";
+      logOutput += `Found ${data.length} changelog entries.\n`;
+      logOutput += "Changelog database updated successfully!\n";
       
-      setEntriesCount(data.length);
-      setSuccess(true);
+      finalEntriesCount = data.length;
+      finalSuccess = true;
       
       await showToast({
         style: Toast.Style.Success,
@@ -80,8 +116,8 @@ export default function UpdateChangelog() {
         message: `Found ${data.length} entries`,
       });
     } catch (error) {
-      setOutput((prev) => prev + `\nError: ${error}`);
-      setSuccess(false);
+      logOutput += `\nError: ${error}\n`;
+      finalSuccess = false;
       
       await showToast({
         style: Toast.Style.Failure,
@@ -90,43 +126,40 @@ export default function UpdateChangelog() {
       });
     } finally {
       setIsLoading(false);
+      // Push the results Detail view
+      push(<UpdateResultDetail 
+              toolName={toolInfo.name} 
+              outputLog={logOutput} 
+              success={finalSuccess} 
+              entriesCount={finalEntriesCount} 
+            />);
     }
   }
   
-  // Format the markdown with the output log
-  const markdown = `# ${toolInfo.name} Changelog Update ${success ? "✅" : ""}
-  
-\`\`\`
-${output}
-\`\`\`
-
-${success ? `Successfully retrieved ${entriesCount} changelog entries.` : ""}
-`;
-  
   return (
-    <Detail
-      markdown={markdown}
+    <Form
       isLoading={isLoading}
       actions={
         <ActionPanel>
-          <Action.CopyToClipboard
-            title="Copy Log"
-            content={output}
-            shortcut={{ modifiers: ["cmd"], key: "c" }}
-          />
-          <Action
-            title="Retry Update"
-            shortcut={{ modifiers: ["cmd"], key: "r" }}
-            onAction={() => {
-              setIsLoading(true);
-              setOutput("Restarting changelog update...");
-              setSuccess(false);
-              setEntriesCount(0);
-              fetchChangelog();
-            }}
+          <Action.SubmitForm
+            title="Update Changelog"
+            icon={Icon.Upload}
+            onSubmit={handleSubmit}
           />
         </ActionPanel>
       }
-    />
+    >
+      <Form.Description text={`Update changelog for ${toolInfo.name} (${toolInfo.url})`} />
+      <Form.Dropdown
+        id="extractionMethod"
+        title="Extraction Method"
+        value={extractionMethod}
+        onChange={setExtractionMethod}
+      >
+        <Form.Dropdown.Item value="default" title="Default Extraction" />
+        <Form.Dropdown.Item value="ai" title="AI Extraction" />
+      </Form.Dropdown>
+      {/* You could add fields here to override toolName/changelogUrl if desired */}      
+    </Form>
   );
 } 
